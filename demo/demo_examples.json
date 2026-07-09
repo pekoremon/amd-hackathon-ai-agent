@@ -1,0 +1,66 @@
+[
+  {
+    "category_id": 1,
+    "category_name": "Factual Knowledge",
+    "task_id": "cat1_1",
+    "prompt": "What causes lightning to occur during thunderstorms?",
+    "answer": "Charge separation within a thunderstorm creates a strong electric field between oppositely charged regions, causing a rapid electrical discharge.",
+    "tokens": 75
+  },
+  {
+    "category_id": 2,
+    "category_name": "Math Reasoning",
+    "task_id": "cat2_1",
+    "prompt": "$5,000 is invested at 6% annual interest, compounded quarterly, for 3 years. What is the final amount, rounded to the nearest cent?",
+    "answer": "$5,978.09",
+    "tokens": 386
+  },
+  {
+    "category_id": 3,
+    "category_name": "Sentiment Classification",
+    "task_id": "cat3_1",
+    "prompt": "Classify the sentiment and justify it: 'The hotel room was spotless and the staff remembered my name every single day.'",
+    "answer": "Positive. The spotless room and personalized staff attention clearly indicate a highly favorable experience.",
+    "tokens": 87
+  },
+  {
+    "category_id": 4,
+    "category_name": "Summarization",
+    "task_id": "cat4_1",
+    "prompt": "Summarize in one sentence: The startup raised $12 million in Series A funding led by Sequoia Capital, with plans to triple its engineering team in Berlin and launch in three new European markets by next spring.",
+    "answer": "Backed by a $12 million Series A led by Sequoia Capital, the startup plans to triple its Berlin engineering team and expand into three new European markets by next spring.",
+    "tokens": 126
+  },
+  {
+    "category_id": 5,
+    "category_name": "Named Entity Recognition",
+    "task_id": "cat5_1",
+    "prompt": "Extract all persons, organizations, locations, and dates: On March 3, 2024, Tim Cook announced at Apple's Cupertino headquarters that the company would invest $1 billion in a new facility in Austin, Texas.",
+    "answer": "PERSON: Tim Cook\nORGANIZATION: Apple\nLOCATION: Cupertino, Austin, Texas\nDATE: March 3, 2024",
+    "tokens": 128
+  },
+  {
+    "category_id": 6,
+    "category_name": "Code Debugging",
+    "task_id": "cat6_1",
+    "prompt": "This function should append an item to a list that's specific to each call, but has a bug. Fix it:\n\ndef add_item(item, items=[]):\n    items.append(item)\n    return items",
+    "answer": "def add_item(item, items=None):\n    if items is None:\n        items = []\n    items.append(item)\n    return items",
+    "tokens": 402
+  },
+  {
+    "category_id": 7,
+    "category_name": "Logical Reasoning",
+    "task_id": "cat7_1",
+    "prompt": "Four coworkers, Dan, Eve, Finn, and Gia, sit in a row of four desks numbered 1 to 4. Dan is not at desk 1 or 4. Eve sits immediately to the left of Finn. Gia sits at desk 4. Finn does not sit at desk 3. Who sits where?",
+    "answer": "Desk 1: Eve, Desk 2: Finn, Desk 3: Dan, Desk 4: Gia",
+    "tokens": 316
+  },
+  {
+    "category_id": 8,
+    "category_name": "Code Generation",
+    "task_id": "cat8_1",
+    "prompt": "Write a Python function `is_balanced(s: str) -> bool` that checks whether a string containing only the characters ( ) [ ] { } has properly matched and nested brackets of all three types.",
+    "answer": "```python\ndef is_balanced(s: str) -> bool:\n    stack = []\n    pairs = {')': '(', ']': '[', '}': '{'}\n    for c in s:\n        if c in pairs.values():\n            stack.append(c)\n        elif c in pairs:\n            if not stack or stack.pop() != pairs[c]:\n                return False\n    return not stack\n```",
+    "tokens": 253
+  }
+]
