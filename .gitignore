@@ -1,0 +1,18 @@
+# Ignore the virtual environment
+venv/
+.venv/
+venv_test/
+
+# Ignore local test/dev scratch files
+local_test/
+docker_test/
+
+# Ignore Claude Code local session config
+.claude/
+
+# Ignore local environment variables
+.env
+
+# Ignore python cache
+__pycache__/
+*.pyc
