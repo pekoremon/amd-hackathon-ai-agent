@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 
@@ -11,6 +12,7 @@ from classify import (
     CODE_DEBUG,
     CODE_GEN,
     LOGIC,
+    MATH,
     classify_category,
     model_for_category,
     pick_model_tiers,
@@ -49,14 +51,20 @@ CONCURRENCY = 16
 
 CATEGORY_INSTRUCTIONS = {
     1: "Answer directly and accurately, no preamble.",
-    2: "Work it out internally; do not show intermediate steps. Output only the final result, with units if relevant.",
+    2: "You must call the run_python tool at least once to numerically compute or verify your answer before "
+       "responding -- even for problems that seem symbolic or derivation-based, evaluate the final expression "
+       "numerically in Python rather than trusting hand arithmetic. Then output only the final result, with units if relevant.",
     3: "Output the sentiment label plus one short justifying sentence.",
     4: "Output only the summary, matching the length/format constraint given.",
     5: "Extract entities grouped by type (PERSON, ORGANIZATION, LOCATION, DATE) as a compact list.",
-    6: "Output only the corrected, complete code, no visible reasoning — no explanation unless asked.",
-    7: "Solve internally with no visible reasoning; verify every condition holds, then state the answer with each "
-       "entity's assignment explicitly labeled (e.g. 'Position 1: Name' or 'Name: value') — never a bare unlabeled list.",
-    8: "Output only a correct, well-structured implementation matching the spec, no visible reasoning.",
+    6: "Use the run_python tool to actually run or test the code before finalizing your fix, if practical. "
+       "Output only the corrected, complete code, no visible reasoning -- no explanation unless asked.",
+    7: "Where the puzzle is a constraint-satisfaction problem, consider using the run_python tool to brute-force "
+       "search or verify candidate solutions rather than working it out by hand -- it's faster and error-free. "
+       "State the answer with each entity's assignment explicitly labeled (e.g. 'Position 1: Name' or "
+       "'Name: value') — never a bare unlabeled list.",
+    8: "Use the run_python tool to test your implementation before finalizing, if practical. Output only a "
+       "correct, well-structured implementation matching the spec, no visible reasoning.",
 }
 
 # 5000 caused 6/19 real tasks to time out (asyncio.TimeoutError at the 29s wall)
@@ -142,6 +150,56 @@ BATCH_SYSTEM_PREFIX = (
 )
 
 
+# Categories where exact computation (arithmetic, running code, brute-force
+# constraint search) is a better fit than deriving the answer by hand in prose
+# -- these get access to the run_python tool. Factual/Sentiment/Summarization/
+# NER don't need it: there's nothing to compute.
+TOOL_CATEGORIES = {MATH, CODE_DEBUG, LOGIC, CODE_GEN}
+TOOL_EXECUTION_TIMEOUT_S = 10
+MAX_TOOL_ROUNDS = 3
+
+TOOL_SPEC = [
+    {
+        "type": "function",
+        "function": {
+            "name": "run_python",
+            "description": (
+                "Execute a Python snippet in a sandboxed subprocess and return its stdout. "
+                "Use this for exact arithmetic, symbolic verification, brute-force constraint "
+                "search, or running/testing code -- anything where precise computation beats "
+                "manual derivation. print() whatever you need to see."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {"code": {"type": "string", "description": "Python code to run."}},
+                "required": ["code"],
+            },
+        },
+    }
+]
+
+
+def _run_python_tool_sync(code: str) -> str:
+    """Runs model-generated code in a separate subprocess (never exec()/eval()
+    in-process) with a hard timeout and output cap, so a hang, infinite loop,
+    or runaway output can't stall the task or blow up the response.
+
+    Blocking by design (subprocess.run) -- must be called via asyncio.to_thread,
+    never awaited directly, or it freezes the whole event loop and stalls every
+    other concurrent task for the duration of the call."""
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True, text=True, timeout=TOOL_EXECUTION_TIMEOUT_S,
+        )
+        output = proc.stdout if proc.returncode == 0 else f"{proc.stdout}\nSTDERR: {proc.stderr}"
+        return output.strip()[:4000] or "(no output)"
+    except subprocess.TimeoutExpired:
+        return f"(execution timed out after {TOOL_EXECUTION_TIMEOUT_S}s)"
+    except Exception as exc:
+        return f"(execution failed: {type(exc).__name__}: {exc})"
+
+
 def extract_json_array(text: str):
     match = re.search(r"\[.*\]", (text or "").strip(), re.DOTALL)
     if not match:
@@ -163,7 +221,10 @@ def write_results(path: str, results: list[dict]) -> None:
         json.dump(results, f, ensure_ascii=False, indent=2)
 
 
-async def _complete(client: AsyncOpenAI, model: str, messages: list, max_tokens: int, reasoning_effort: str | None):
+async def _complete(
+    client: AsyncOpenAI, model: str, messages: list, max_tokens: int,
+    reasoning_effort: str | None, tools: list | None = None,
+):
     """Chat completion with a fallback for reasoning_effort support, which varies
     by model: some reject a given value, others reject the field outright. Rather
     than pattern-matching specific error wording (which we can only ever observe
@@ -172,16 +233,73 @@ async def _complete(client: AsyncOpenAI, model: str, messages: list, max_tokens:
     with it stripped entirely -- a model that doesn't understand the field can
     still answer the question."""
     extra_body = {"reasoning_effort": reasoning_effort} if reasoning_effort else {}
+    tool_kwargs = {"tools": tools, "tool_choice": "auto"} if tools else {}
     try:
         return await client.chat.completions.create(
-            model=model, messages=messages, max_tokens=max_tokens, temperature=0, extra_body=extra_body,
+            model=model, messages=messages, max_tokens=max_tokens, temperature=0,
+            extra_body=extra_body, **tool_kwargs,
         )
     except APIStatusError:
         if not extra_body:
             raise
         return await client.chat.completions.create(
-            model=model, messages=messages, max_tokens=max_tokens, temperature=0,
+            model=model, messages=messages, max_tokens=max_tokens, temperature=0, **tool_kwargs,
         )
+
+
+async def _answer_with_tools(
+    client: AsyncOpenAI, model: str, messages: list, max_tokens: int,
+    reasoning_effort: str | None, tools: list | None,
+) -> str:
+    """Runs request/tool-execution cycles (feeding each tool result back to the
+    model) until it returns a plain answer or MAX_TOOL_ROUNDS is used up. Each
+    individual API call still gets its own independent REQUEST_TIMEOUT_S budget
+    -- this chains multiple such calls together, it never pools or extends any
+    single call's time limit."""
+    for _ in range(MAX_TOOL_ROUNDS):
+        resp = await asyncio.wait_for(
+            _complete(client, model, messages, max_tokens, reasoning_effort, tools=tools),
+            timeout=REQUEST_TIMEOUT_S,
+        )
+        msg = resp.choices[0].message
+        if not msg.tool_calls:
+            content = (msg.content or "").strip()
+            # Some models' serving setup doesn't reliably parse their own
+            # tool-call format into the API's structured tool_calls field --
+            # the attempt leaks through as raw text instead (e.g. a literal
+            # "<tool_call>" tag) rather than a real answer. Detecting this
+            # generic protocol artifact (not any specific question's content)
+            # and forcing a plain retry beats returning garbage as the answer.
+            if "<tool_call" in content or content.startswith("run_python("):
+                resp = await asyncio.wait_for(
+                    _complete(client, model, messages, max_tokens, reasoning_effort, tools=None),
+                    timeout=REQUEST_TIMEOUT_S,
+                )
+                return (resp.choices[0].message.content or "").strip()
+            return content
+
+        messages.append({
+            "role": "assistant",
+            "content": msg.content,
+            "tool_calls": [
+                {"id": tc.id, "type": "function", "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
+                for tc in msg.tool_calls
+            ],
+        })
+        for tc in msg.tool_calls:
+            try:
+                args = json.loads(tc.function.arguments)
+                result = await asyncio.to_thread(_run_python_tool_sync, args.get("code", ""))
+            except Exception as exc:
+                result = f"(tool call failed: {type(exc).__name__}: {exc})"
+            messages.append({"role": "tool", "tool_call_id": tc.id, "content": result})
+
+    # Ran out of tool rounds -- force a final answer with no tools offered.
+    resp = await asyncio.wait_for(
+        _complete(client, model, messages, max_tokens, reasoning_effort, tools=None),
+        timeout=REQUEST_TIMEOUT_S,
+    )
+    return (resp.choices[0].message.content or "").strip()
 
 
 async def answer_task(client: AsyncOpenAI, task: dict, tiers: dict, sem: asyncio.Semaphore) -> dict:
@@ -192,20 +310,17 @@ async def answer_task(client: AsyncOpenAI, task: dict, tiers: dict, sem: asyncio
     system_prompt = SYSTEM_PREFIX + CATEGORY_INSTRUCTIONS[category]
     max_tokens = CATEGORY_MAX_TOKENS[category]
     reasoning_effort = CATEGORY_REASONING_EFFORT[category]
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": prompt},
-    ]
+    tools = TOOL_SPEC if category in TOOL_CATEGORIES else None
 
     last_error = None
     async with sem:
         for attempt in range(MAX_RETRIES + 1):
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": prompt},
+            ]
             try:
-                resp = await asyncio.wait_for(
-                    _complete(client, model, messages, max_tokens, reasoning_effort),
-                    timeout=REQUEST_TIMEOUT_S,
-                )
-                answer = (resp.choices[0].message.content or "").strip()
+                answer = await _answer_with_tools(client, model, messages, max_tokens, reasoning_effort, tools)
                 return {"task_id": task_id, "answer": answer}
             except Exception as exc:
                 # Broad on purpose: one task's failure must not crash the whole batch.
