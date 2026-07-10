@@ -49,76 +49,80 @@ REQUEST_TIMEOUT_S = 29
 MAX_RETRIES = 1
 CONCURRENCY = 16
 
+# Ultra-diet: every instruction minimal, and answer-FIRST ordering for the
+# reasoning categories -- models put the conclusion last by default, so when a
+# tight max_tokens cap truncates the tail, the answer itself is what gets cut.
+# Leading with the final answer makes truncation cost explanation, not answer.
 CATEGORY_INSTRUCTIONS = {
-    1: "Answer directly and accurately, no preamble.",
-    2: "You must call the run_python tool at least once to numerically compute or verify your answer before "
-       "responding -- even for problems that seem symbolic or derivation-based, evaluate the final expression "
-       "numerically in Python rather than trusting hand arithmetic. Then output only the final result, with units if relevant.",
+    1: "Give a direct answer first, then only the explanation the prompt explicitly requires.",
+    2: "State the final result (with units) in the first line, then only the working the prompt "
+       "explicitly requires.",
     3: "Output the sentiment label plus one short justifying sentence.",
-    4: "Output only the summary, matching the length/format constraint given.",
-    5: "Extract entities grouped by type (PERSON, ORGANIZATION, LOCATION, DATE) as a compact list.",
-    6: "Use the run_python tool to actually run or test the code before finalizing your fix, if practical. "
-       "Output only the corrected, complete code, no visible reasoning -- no explanation unless asked.",
-    7: "Where the puzzle is a constraint-satisfaction problem, consider using the run_python tool to brute-force "
-       "search or verify candidate solutions rather than working it out by hand -- it's faster and error-free. "
-       "State the answer with each entity's assignment explicitly labeled (e.g. 'Position 1: Name' or "
-       "'Name: value') — never a bare unlabeled list.",
-    8: "Use the run_python tool to test your implementation before finalizing, if practical. Output only a "
-       "correct, well-structured implementation matching the spec, no visible reasoning.",
+    4: "Output only the summary, obeying the stated format/length constraint.",
+    5: "List entities grouped by type (PERSON, ORGANIZATION, LOCATION, DATE), nothing else.",
+    6: "Output only the corrected, complete code.",
+    7: "First line: the final answer with each assignment explicitly labeled (e.g. 'Position 1: "
+       "Name'). Then only the justification the prompt explicitly requires.",
+    8: "Output only a correct implementation matching the spec.",
 }
 
-# 5000 caused 6/19 real tasks to time out (asyncio.TimeoutError at the 29s wall)
-# on the hardest categories -- the model never finishes generating, so it comes
-# back completely empty instead of a shorter-but-complete answer. Measured
-# empirically against real hard prompts (math derivations, a 7-entity logic
-# puzzle, full-program codegen): 1500 reliably finishes with 11+ seconds of
-# margin (worst observed: 17.8s), while 2000 already timed out once. Current
-# goal is maximizing how many of the 19 tasks get *any* complete answer, not
-# token efficiency, so every category is raised well above its original ceiling
-# (350/700/200/300/350/900/900/900) but capped at the empirically safe value.
+# Deliberate, bounded token/accuracy trade: the SACRIFICE_COUNT tasks expected
+# to be most expensive get one cheap 200-token no-tool call instead of the full
+# tool-chain pipeline. Selection is generic (category cost ranking measured
+# across many runs, then prompt length) -- never tied to specific question
+# content. Unlike the random-sacrifice experiment (which hit already-cheap
+# tasks and saved nothing at the same accuracy cost), this targets exactly the
+# tasks whose tool chains cost the most. Worst case: -SACRIFICE_COUNT correct.
+# Overridable per-image via env (Dockerfile ARG) without a code edit.
+SACRIFICE_COUNT = int(os.environ.get("SACRIFICE_COUNT", "2"))
+SACRIFICE_MAX_TOKENS = 200
+SACRIFICE_INSTRUCTION = (
+    "State your best final answer as concisely as possible. No derivation, no preamble."
+)
+# Most-expensive-first. With tools disabled, per-task cost is driven by the
+# completion ceiling, so the code categories (700-token caps for full
+# programs) are now the costliest, then Math/Logic.
+EXPENSIVE_CATEGORY_ORDER = (CODE_DEBUG, CODE_GEN, MATH, LOGIC)
+
+# Ultra-diet ceilings: sized to the minimum a *correct* answer plausibly needs
+# per category (code must fit whole programs; a sentiment label doesn't), not
+# to what the model would like to say. Truncation risk is absorbed by the
+# answer-first ordering in CATEGORY_INSTRUCTIONS -- if the tail gets cut, it's
+# explanation, not the answer. Baseline slack: the low-effort build scored
+# 100% (19/19), so the accuracy gate can absorb a few losses from this.
 CATEGORY_MAX_TOKENS = {
-    1: 1500,
-    2: 1500,
-    3: 1000,
-    4: 1000,
-    5: 1000,
-    6: 1500,
-    7: 1500,
-    8: 1500,
+    1: 350,
+    2: 400,
+    3: 120,
+    4: 250,
+    5: 200,
+    6: 700,
+    7: 350,
+    8: 700,
 }
 
-# Raised 2/6/7/8 from "low": these are the categories where models were observed
-# spending their visible output arguing with themselves about instruction
-# conflicts rather than reasoning privately. More reasoning budget gives the
-# model room to work through genuinely hard problems (multi-step derivations,
-# constraint puzzles, full programs) before answering, instead of doing that
-# work out loud in the completion. "high" across the board pushed several
-# tasks over the 29s wall (more hidden reasoning time = less margin), so
-# "medium" is the current compromise -- less risk of timeout, still meant to
-# reduce meta-commentary versus "low". 1/3/4/5 stay "none" since they don't
+# "low" for the reasoning-heavy categories: the low-effort build scored a
+# perfect 19/19 on the real platform (vs 18/19 at "medium"), so "low" is both
+# the accuracy-proven and cheaper choice. 1/3/4/5 stay "none" since they don't
 # need multi-step reasoning to answer correctly regardless of prompt difficulty.
 CATEGORY_REASONING_EFFORT = {
     1: "none",
-    2: "medium",
+    2: "low",
     3: "none",
     4: "none",
     5: "none",
-    6: "medium",
-    7: "medium",
-    8: "medium",
+    6: "low",
+    7: "low",
+    8: "low",
 }
 
-# Previously told the model to be terse and skip chain-of-thought regardless of
-# what the task itself asked for. That directly conflicted with prompts that
-# explicitly request extensive output (full derivations, long-form
-# justification, complete production code), and models were burning their
-# entire token budget arguing with themselves about the contradiction instead
-# of answering -- observed across math, logic, and codegen categories. Current
-# priority is correctness, not token cost, so this now just asks the model to
-# follow whatever the prompt itself asks for, with no length pressure.
+# Terseness is asked for carefully: an earlier blanket "no chain-of-thought"
+# rule conflicted with prompts that explicitly demand derivations/long output
+# and caused meta-commentary paralysis. This version only bans *unrequested*
+# padding -- anything the prompt explicitly requires is still fair game.
 SYSTEM_PREFIX = (
-    "Answer the question fully and accurately, following any instructions in the "
-    "prompt exactly, including any requested length, level of detail, or format.\n\n"
+    "Answer accurately and follow the prompt's explicit requirements. Be brief: "
+    "add nothing the prompt didn't ask for. "
 )
 
 # Measured empirically (3 replicated runs): batching same-category tasks into one
@@ -150,13 +154,19 @@ BATCH_SYSTEM_PREFIX = (
 )
 
 
-# Categories where exact computation (arithmetic, running code, brute-force
-# constraint search) is a better fit than deriving the answer by hand in prose
-# -- these get access to the run_python tool. Factual/Sentiment/Summarization/
-# NER don't need it: there's nothing to compute.
-TOOL_CATEGORIES = {MATH, CODE_DEBUG, LOGIC, CODE_GEN}
+# Ultra-diet: tools disabled entirely. Every tool round re-sends the whole
+# conversation plus the tool schema, adding ~700-1500 tokens per tool-using
+# task -- the single biggest remaining cost after the caps were tightened.
+# The accuracy risk is real (tools drove the 63%->94.7% jump) but the current
+# baseline is 19/19, so there is measured slack to spend; if accuracy falls
+# below the gate, restore {MATH, CODE_DEBUG, LOGIC, CODE_GEN} first.
+TOOL_CATEGORIES = set()
 TOOL_EXECUTION_TIMEOUT_S = 10
-MAX_TOOL_ROUNDS = 3
+# Each tool round re-sends the entire conversation (prompt + all prior tool
+# results), so rounds are the single most expensive knob in the pipeline.
+# 2 keeps the one verify-and-answer cycle that drove the accuracy jump while
+# cutting the long exploratory chains observed at 3.
+MAX_TOOL_ROUNDS = 2
 
 TOOL_SPEC = [
     {
@@ -164,10 +174,8 @@ TOOL_SPEC = [
         "function": {
             "name": "run_python",
             "description": (
-                "Execute a Python snippet in a sandboxed subprocess and return its stdout. "
-                "Use this for exact arithmetic, symbolic verification, brute-force constraint "
-                "search, or running/testing code -- anything where precise computation beats "
-                "manual derivation. print() whatever you need to see."
+                "Run Python code in a sandbox, returning stdout. Use for exact arithmetic, "
+                "brute-force search, or testing code. print() what you need to see."
             ),
             "parameters": {
                 "type": "object",
@@ -193,11 +201,68 @@ def _run_python_tool_sync(code: str) -> str:
             capture_output=True, text=True, timeout=TOOL_EXECUTION_TIMEOUT_S,
         )
         output = proc.stdout if proc.returncode == 0 else f"{proc.stdout}\nSTDERR: {proc.stderr}"
-        return output.strip()[:4000] or "(no output)"
+        # Tool output is re-sent to the model with every subsequent round, so
+        # this cap is paid multiple times -- keep it tight.
+        return output.strip()[:1000] or "(no output)"
     except subprocess.TimeoutExpired:
         return f"(execution timed out after {TOOL_EXECUTION_TIMEOUT_S}s)"
     except Exception as exc:
         return f"(execution failed: {type(exc).__name__}: {exc})"
+
+
+# ---------------------------------------------------------------------------
+# Local model (zero-token path). Officially sanctioned by the organizers:
+# answers produced by a model running inside the container count fully toward
+# accuracy and cost zero score-tokens (only FIREWORKS_BASE_URL traffic is
+# counted). Grading env is 4 GB RAM / 2 vCPU, no GPU, nothing pre-installed,
+# so a ~2 GB 4-bit 3B GGUF via llama.cpp is the practical ceiling.
+#
+# Routing: LOCAL_CATEGORIES (default Sentiment+NER -- label/extraction tasks a
+# 3B handles credibly; Factual/Math/Code stay on Fireworks where a small model
+# would fail) plus any sacrificed task (a free local attempt strictly beats a
+# 200-token Fireworks guess). Every local path falls back to the normal
+# Fireworks path on any failure, so the worst case equals not having the model.
+LOCAL_MODEL_PATH = os.environ.get("LOCAL_MODEL_PATH", "/app/models/local-model.gguf")
+LOCAL_CATEGORIES = {
+    int(x) for x in os.environ.get("LOCAL_CATEGORIES", "3,5").split(",") if x.strip().isdigit()
+}
+# 2 vCPU means local generation is slow (~5-10 tok/s); cap sacrificed tasks'
+# local attempts so two of them can't eat the 10-minute container budget.
+LOCAL_SACRIFICE_MAX_TOKENS = 400
+
+_local_llm = None
+
+
+def load_local_model() -> bool:
+    """Load the bundled GGUF via llama-cpp-python. Failure is non-fatal:
+    everything just routes to Fireworks as before."""
+    global _local_llm
+    try:
+        from llama_cpp import Llama
+        _local_llm = Llama(
+            model_path=LOCAL_MODEL_PATH,
+            n_ctx=2048,
+            n_threads=max(1, os.cpu_count() or 2),
+            verbose=False,
+        )
+        print("[info] local model loaded", file=sys.stderr)
+        return True
+    except Exception as exc:
+        print(f"[warn] local model unavailable, using Fireworks for everything: {exc}", file=sys.stderr)
+        return False
+
+
+def _local_complete_sync(system_prompt: str, prompt: str, max_tokens: int) -> str:
+    """Blocking llama.cpp generation -- call via asyncio.to_thread only."""
+    resp = _local_llm.create_chat_completion(
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": prompt},
+        ],
+        max_tokens=max_tokens,
+        temperature=0,
+    )
+    return (resp["choices"][0]["message"]["content"] or "").strip()
 
 
 def extract_json_array(text: str):
@@ -256,6 +321,7 @@ async def _answer_with_tools(
     individual API call still gets its own independent REQUEST_TIMEOUT_S budget
     -- this chains multiple such calls together, it never pools or extends any
     single call's time limit."""
+    last_partial = ""
     for _ in range(MAX_TOOL_ROUNDS):
         resp = await asyncio.wait_for(
             _complete(client, model, messages, max_tokens, reasoning_effort, tools=tools),
@@ -278,6 +344,11 @@ async def _answer_with_tools(
                 return (resp.choices[0].message.content or "").strip()
             return content
 
+        # Models often write real analysis in content alongside a tool call;
+        # keep the latest such text as a last-resort answer if the final
+        # forced call comes back empty.
+        if (msg.content or "").strip():
+            last_partial = msg.content.strip()
         messages.append({
             "role": "assistant",
             "content": msg.content,
@@ -295,22 +366,82 @@ async def _answer_with_tools(
             messages.append({"role": "tool", "tool_call_id": tc.id, "content": result})
 
     # Ran out of tool rounds -- force a final answer with no tools offered.
+    # reasoning_effort deliberately dropped here: observed a model spend this
+    # call's entire max_tokens on hidden reasoning and return empty visible
+    # content; with no effort requested the budget goes to the answer itself.
     resp = await asyncio.wait_for(
-        _complete(client, model, messages, max_tokens, reasoning_effort, tools=None),
+        _complete(client, model, messages, max_tokens, None, tools=None),
         timeout=REQUEST_TIMEOUT_S,
     )
-    return (resp.choices[0].message.content or "").strip()
+    final = (resp.choices[0].message.content or "").strip()
+    # An empty final beat nothing only if we truly have nothing -- prefer the
+    # best partial text the model produced during its tool rounds.
+    return final or last_partial
 
 
-async def answer_task(client: AsyncOpenAI, task: dict, tiers: dict, sem: asyncio.Semaphore) -> dict:
+def pick_sacrifices(tasks: list[dict]) -> set:
+    """Pick the SACRIFICE_COUNT tasks expected to burn the most tokens if run
+    through the full pipeline: most expensive category first (per
+    EXPENSIVE_CATEGORY_ORDER), longest prompt first within a category. Purely
+    structural signals -- category and length -- never question content."""
+    if SACRIFICE_COUNT <= 0:
+        return set()
+
+    def cost_key(t):
+        prompt = normalize_prompt(t["prompt"])
+        category = classify_category(prompt)
+        try:
+            rank = EXPENSIVE_CATEGORY_ORDER.index(category)
+        except ValueError:
+            rank = len(EXPENSIVE_CATEGORY_ORDER)
+        return (rank, -len(prompt))
+
+    ordered = sorted(tasks, key=cost_key)
+    return {t["task_id"] for t in ordered[:SACRIFICE_COUNT]}
+
+
+# Local generation is CPU-bound on 2 vCPU -- one at a time; parallel local
+# calls would just thrash each other. Fireworks calls (network-bound) still
+# run concurrently alongside the local queue.
+_local_sem = asyncio.Semaphore(1)
+
+
+async def answer_task(
+    client: AsyncOpenAI, task: dict, tiers: dict, sem: asyncio.Semaphore, sacrificed: bool = False,
+) -> dict:
     task_id = task["task_id"]
     prompt = normalize_prompt(task["prompt"])
     category = classify_category(prompt)
     model = model_for_category(category, tiers)
-    system_prompt = SYSTEM_PREFIX + CATEGORY_INSTRUCTIONS[category]
-    max_tokens = CATEGORY_MAX_TOKENS[category]
-    reasoning_effort = CATEGORY_REASONING_EFFORT[category]
-    tools = TOOL_SPEC if category in TOOL_CATEGORIES else None
+
+    if _local_llm is not None and (sacrificed or category in LOCAL_CATEGORIES):
+        try:
+            local_max_tokens = CATEGORY_MAX_TOKENS[category]
+            if sacrificed:
+                local_max_tokens = min(local_max_tokens, LOCAL_SACRIFICE_MAX_TOKENS)
+            async with _local_sem:
+                answer = await asyncio.to_thread(
+                    _local_complete_sync,
+                    SYSTEM_PREFIX + CATEGORY_INSTRUCTIONS[category],
+                    prompt,
+                    local_max_tokens,
+                )
+            if answer:
+                return {"task_id": task_id, "answer": answer}
+            print(f"[warn] local model returned empty for {task_id}, falling back to Fireworks", file=sys.stderr)
+        except Exception as exc:
+            print(f"[warn] local model failed for {task_id} ({exc}), falling back to Fireworks", file=sys.stderr)
+
+    if sacrificed:
+        system_prompt = SYSTEM_PREFIX + SACRIFICE_INSTRUCTION
+        max_tokens = SACRIFICE_MAX_TOKENS
+        reasoning_effort = "none"
+        tools = None
+    else:
+        system_prompt = SYSTEM_PREFIX + CATEGORY_INSTRUCTIONS[category]
+        max_tokens = CATEGORY_MAX_TOKENS[category]
+        reasoning_effort = CATEGORY_REASONING_EFFORT[category]
+        tools = TOOL_SPEC if category in TOOL_CATEGORIES else None
 
     last_error = None
     async with sem:
@@ -408,7 +539,13 @@ async def _answer_all(client: AsyncOpenAI, tasks: list[dict], tiers: dict, sem: 
     task_by_id = {t["task_id"]: t for t in tasks}
     individual_tasks, batch_groups = _plan_batches(tasks)
 
-    individual_results = await asyncio.gather(*(answer_task(client, t, tiers, sem) for t in individual_tasks))
+    sacrificed_ids = pick_sacrifices(tasks)
+    if sacrificed_ids:
+        print(f"[info] sacrificing (cheap single-shot): {sorted(sacrificed_ids)}", file=sys.stderr)
+
+    individual_results = await asyncio.gather(*(
+        answer_task(client, t, tiers, sem, sacrificed=t["task_id"] in sacrificed_ids) for t in individual_tasks
+    ))
     batch_results = await asyncio.gather(*(answer_batch(client, cat, chunk, tiers, sem) for cat, chunk in batch_groups))
 
     results = list(individual_results)
@@ -422,7 +559,9 @@ async def _answer_all(client: AsyncOpenAI, tasks: list[dict], tiers: dict, sem: 
 
     if fallback_needed:
         print(f"[info] falling back to individual calls for {len(fallback_needed)} tasks", file=sys.stderr)
-        results.extend(await asyncio.gather(*(answer_task(client, t, tiers, sem) for t in fallback_needed)))
+        results.extend(await asyncio.gather(*(
+            answer_task(client, t, tiers, sem, sacrificed=t["task_id"] in sacrificed_ids) for t in fallback_needed
+        )))
 
     return results
 
@@ -447,6 +586,8 @@ async def run() -> int:
 
     tasks = load_tasks(INPUT_PATH)
     print(f"[info] loaded {len(tasks)} tasks", file=sys.stderr)
+
+    await asyncio.to_thread(load_local_model)
 
     client = AsyncOpenAI(api_key=api_key, base_url=base_url)
     sem = asyncio.Semaphore(CONCURRENCY)
