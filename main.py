@@ -5,7 +5,7 @@ import re
 import sys
 import time
 
-from openai import AsyncOpenAI, BadRequestError
+from openai import APIStatusError, AsyncOpenAI
 
 from classify import (
     CODE_DEBUG,
@@ -95,7 +95,12 @@ SYSTEM_PREFIX = (
 # the batch's JSON overhead and longer system prompt don't get amortized away) but
 # consistently saves 30-63% for these three — the model reasons noticeably less
 # per-problem when it has several to get through in one call versus one in isolation.
-BATCH_CATEGORIES = {CODE_DEBUG, LOGIC, CODE_GEN}
+#
+# TEMPORARILY DISABLED (empty set) to isolate whether batching is responsible for
+# a failed accuracy gate on the real eval set — every task currently goes through
+# the individual-call path in answer_task regardless of category. Restore to
+# {CODE_DEBUG, LOGIC, CODE_GEN} once that's confirmed one way or the other.
+BATCH_CATEGORIES = set()
 BATCH_SIZE = 5
 
 BATCH_SYSTEM_PREFIX = (
@@ -130,26 +135,24 @@ def write_results(path: str, results: list[dict]) -> None:
 
 
 async def _complete(client: AsyncOpenAI, model: str, messages: list, max_tokens: int, reasoning_effort: str | None):
-    """Chat completion with a fallback chain for reasoning_effort support, which
-    varies a lot by model: some reject a given value (e.g. gpt-oss-120b has no
-    "none"), others reject the field outright (non-reasoning models)."""
+    """Chat completion with a fallback for reasoning_effort support, which varies
+    by model: some reject a given value, others reject the field outright. Rather
+    than pattern-matching specific error wording (which we can only ever observe
+    from models we've actually called, and the launch-day roster may differ from
+    those), any API-level rejection while reasoning_effort was set retries once
+    with it stripped entirely -- a model that doesn't understand the field can
+    still answer the question."""
     extra_body = {"reasoning_effort": reasoning_effort} if reasoning_effort else {}
     try:
         return await client.chat.completions.create(
             model=model, messages=messages, max_tokens=max_tokens, temperature=0, extra_body=extra_body,
         )
-    except BadRequestError as exc:
-        message = str(exc)
-        if reasoning_effort == "none" and "reasoning effort" in message.lower():
-            return await client.chat.completions.create(
-                model=model, messages=messages, max_tokens=max_tokens, temperature=0,
-                extra_body={"reasoning_effort": "low"},
-            )
-        if reasoning_effort and ("not permitted" in message.lower() or "reasoning" in message.lower()):
-            return await client.chat.completions.create(
-                model=model, messages=messages, max_tokens=max_tokens, temperature=0,
-            )
-        raise
+    except APIStatusError:
+        if not extra_body:
+            raise
+        return await client.chat.completions.create(
+            model=model, messages=messages, max_tokens=max_tokens, temperature=0,
+        )
 
 
 async def answer_task(client: AsyncOpenAI, task: dict, tiers: dict, sem: asyncio.Semaphore) -> dict:
