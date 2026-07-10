@@ -59,22 +59,24 @@ CATEGORY_INSTRUCTIONS = {
     8: "Output only a correct, well-structured implementation matching the spec, no visible reasoning.",
 }
 
-# TEMPORARILY RAISED for debugging: original tighter ceilings (350/700/200/300/
-# 350/900/900/900) were tuned against our own synthetic test prompts and may be
-# truncating real answers mid-response on the actual 19-task eval, which would
-# produce invalid/incomplete answers independent of batching or reasoning_effort.
-# Note this is still bounded in practice by REQUEST_TIMEOUT_S=29 (the rule's own
-# 30s-per-request limit) -- a model that needs longer to finish will hit that
-# wall regardless of how high max_tokens is set.
+# 5000 caused 6/19 real tasks to time out (asyncio.TimeoutError at the 29s wall)
+# on the hardest categories -- the model never finishes generating, so it comes
+# back completely empty instead of a shorter-but-complete answer. Measured
+# empirically against real hard prompts (math derivations, a 7-entity logic
+# puzzle, full-program codegen): 1500 reliably finishes with 11+ seconds of
+# margin (worst observed: 17.8s), while 2000 already timed out once. Current
+# goal is maximizing how many of the 19 tasks get *any* complete answer, not
+# token efficiency, so every category is raised well above its original ceiling
+# (350/700/200/300/350/900/900/900) but capped at the empirically safe value.
 CATEGORY_MAX_TOKENS = {
-    1: 5000,
-    2: 5000,
-    3: 5000,
-    4: 5000,
-    5: 5000,
-    6: 5000,
-    7: 5000,
-    8: 5000,
+    1: 1500,
+    2: 1500,
+    3: 1000,
+    4: 1000,
+    5: 1000,
+    6: 1500,
+    7: 1500,
+    8: 1500,
 }
 
 # "none" for categories that don't need multi-step reasoning to answer correctly —
