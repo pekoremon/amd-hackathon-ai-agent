@@ -198,8 +198,13 @@ def pick_model_tiers(allowed_models: list[str], overrides: dict | None = None) -
 
 
 def model_for_category(category: int, tiers: dict) -> str:
-    if category in CODE_CATEGORIES:
-        return tiers["code"]
-    if category in STRONG_CATEGORIES:
-        return tiers["strong"]
-    return tiers["cheap"]
+    # TEMPORARILY forcing every category onto the strong model, ignoring token
+    # cost entirely, to isolate whether weak-model routing is the cause of the
+    # accuracy failure on the real eval set. Restore the tiered logic (commented
+    # out below) once that's confirmed one way or the other.
+    return tiers["strong"]
+    # if category in CODE_CATEGORIES:
+    #     return tiers["code"]
+    # if category in STRONG_CATEGORIES:
+    #     return tiers["strong"]
+    # return tiers["cheap"]
