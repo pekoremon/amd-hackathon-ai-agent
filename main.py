@@ -79,24 +79,38 @@ CATEGORY_MAX_TOKENS = {
     8: 1500,
 }
 
-# "none" for categories that don't need multi-step reasoning to answer correctly —
-# on reasoning-capable models this skips hidden chain-of-thought tokens entirely
-# (measured ~5x fewer total tokens for the same answer quality). "low" keeps a
-# little reasoning for categories where it measurably helps correctness.
+# Raised 2/6/7/8 from "low": these are the categories where models were observed
+# spending their visible output arguing with themselves about instruction
+# conflicts rather than reasoning privately. More reasoning budget gives the
+# model room to work through genuinely hard problems (multi-step derivations,
+# constraint puzzles, full programs) before answering, instead of doing that
+# work out loud in the completion. "high" across the board pushed several
+# tasks over the 29s wall (more hidden reasoning time = less margin), so
+# "medium" is the current compromise -- less risk of timeout, still meant to
+# reduce meta-commentary versus "low". 1/3/4/5 stay "none" since they don't
+# need multi-step reasoning to answer correctly regardless of prompt difficulty.
 CATEGORY_REASONING_EFFORT = {
     1: "none",
-    2: "low",
+    2: "medium",
     3: "none",
     4: "none",
     5: "none",
-    6: "low",
-    7: "low",
-    8: "low",
+    6: "medium",
+    7: "medium",
+    8: "medium",
 }
 
+# Previously told the model to be terse and skip chain-of-thought regardless of
+# what the task itself asked for. That directly conflicted with prompts that
+# explicitly request extensive output (full derivations, long-form
+# justification, complete production code), and models were burning their
+# entire token budget arguing with themselves about the contradiction instead
+# of answering -- observed across math, logic, and codegen categories. Current
+# priority is correctness, not token cost, so this now just asks the model to
+# follow whatever the prompt itself asks for, with no length pressure.
 SYSTEM_PREFIX = (
-    "Answer only — no chain-of-thought, no preamble, no restating the question. "
-    "Be concise; every extra token costs points.\n\n"
+    "Answer the question fully and accurately, following any instructions in the "
+    "prompt exactly, including any requested length, level of detail, or format.\n\n"
 )
 
 # Measured empirically (3 replicated runs): batching same-category tasks into one
