@@ -59,15 +59,22 @@ CATEGORY_INSTRUCTIONS = {
     8: "Output only a correct, well-structured implementation matching the spec, no visible reasoning.",
 }
 
+# TEMPORARILY RAISED for debugging: original tighter ceilings (350/700/200/300/
+# 350/900/900/900) were tuned against our own synthetic test prompts and may be
+# truncating real answers mid-response on the actual 19-task eval, which would
+# produce invalid/incomplete answers independent of batching or reasoning_effort.
+# Note this is still bounded in practice by REQUEST_TIMEOUT_S=29 (the rule's own
+# 30s-per-request limit) -- a model that needs longer to finish will hit that
+# wall regardless of how high max_tokens is set.
 CATEGORY_MAX_TOKENS = {
-    1: 350,
-    2: 700,
-    3: 200,
-    4: 300,
-    5: 350,
-    6: 900,
-    7: 900,
-    8: 900,
+    1: 5000,
+    2: 5000,
+    3: 5000,
+    4: 5000,
+    5: 5000,
+    6: 5000,
+    7: 5000,
+    8: 5000,
 }
 
 # "none" for categories that don't need multi-step reasoning to answer correctly —
