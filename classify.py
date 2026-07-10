@@ -57,6 +57,31 @@ _LOGIC_PHRASE_RES = (
 
 _MATH_RE = re.compile(r"\d.*%|percent|average|total|how many|calculate|sum of|product of|difference of|multiply|divide|ratio|profit|discount|interest")
 
+# Every task set we've seen from this source labels its own category as a
+# literal prefix (e.g. "Code Debugging: The following..."). That's a far more
+# reliable signal than guessing from content keywords -- it's a structural
+# formatting convention, not something tied to any specific question's
+# content, so checking for it generalizes to any prompt using the same
+# convention rather than overfitting to particular tasks. Keyword heuristics
+# below remain as a fallback for prompts that don't carry this label.
+_LABEL_PREFIX_RE = re.compile(
+    r"^\s*(factual knowledge|mathematical reasoning|sentiment classification|"
+    r"text summari[sz]ation|named entity recognition|code debugging|"
+    r"logical\s*/\s*deductive reasoning|code generation)\s*:",
+    re.IGNORECASE,
+)
+_LABEL_TO_CATEGORY = {
+    "factual knowledge": 1,
+    "mathematical reasoning": 2,
+    "sentiment classification": 3,
+    "text summarisation": 4,
+    "text summarization": 4,
+    "named entity recognition": 5,
+    "code debugging": 6,
+    "logical / deductive reasoning": 7,
+    "code generation": 8,
+}
+
 
 def _looks_like_ner(p: str) -> bool:
     if any(r.search(p) for r in _NER_PHRASE_RES):
@@ -68,7 +93,19 @@ def _looks_like_logic(p: str) -> bool:
     return any(r.search(p) for r in _LOGIC_PHRASE_RES)
 
 
+def _label_category(prompt: str):
+    match = _LABEL_PREFIX_RE.match(prompt)
+    if not match:
+        return None
+    normalized = re.sub(r"\s+", " ", match.group(1).lower()).replace(" / ", " / ")
+    return _LABEL_TO_CATEGORY.get(normalized)
+
+
 def classify_category(prompt: str) -> int:
+    labeled = _label_category(prompt)
+    if labeled is not None:
+        return labeled
+
     p = prompt.lower()
 
     if _CODE_HINT_RE.search(prompt) and _DEBUG_WORDS_RE.search(p):
