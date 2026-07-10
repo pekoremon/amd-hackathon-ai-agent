@@ -119,10 +119,16 @@ SYSTEM_PREFIX = (
 # consistently saves 30-63% for these three — the model reasons noticeably less
 # per-problem when it has several to get through in one call versus one in isolation.
 #
-# TEMPORARILY DISABLED (empty set) to isolate whether batching is responsible for
-# a failed accuracy gate on the real eval set — every task currently goes through
-# the individual-call path in answer_task regardless of category. Restore to
-# {CODE_DEBUG, LOGIC, CODE_GEN} once that's confirmed one way or the other.
+# Re-tested after confirming batching wasn't the original cause of the accuracy
+# failure -- disabled again after all 3 batches (categories 6/7/8) failed and
+# fell back to individual calls on the real 19-task eval. The batch max_tokens
+# ceiling (CATEGORY_MAX_TOKENS * batch size) assumes spare capacity to combine
+# several tasks per call, but these tasks are individually already near the
+# per-task safe ceiling -- there's no room to batch them without exceeding the
+# 29s wall. Fallback logic recovered all 8 affected tasks with no data lost,
+# but wall-clock time ballooned (168s vs ~30s) and likely caused collateral
+# timeouts on unrelated tasks via semaphore contention while failed batches
+# held their retry slots. Net negative for this task profile; keep disabled.
 BATCH_CATEGORIES = set()
 BATCH_SIZE = 5
 
